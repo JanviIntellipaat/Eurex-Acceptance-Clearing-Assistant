@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import hashlib
 import io
+import os
 
 from .embeddings import Embeddings
 from .vector_faiss import FaissVectorStore, Chunk
 from .structured import StructuredStore
 
-# Optional imports for document parsing
 try:
     import pdfplumber
 except Exception:
@@ -29,11 +29,6 @@ class IndexTextResult:
     preview: str
 
 class KnowledgeBase:
-    """
-    Orchestrates ingestion and retrieval across:
-      - Unstructured text (PDF text, DOCX paragraphs, MD/TXT, CSV/XLSX/XLS samples) → FAISS vector index
-      - Structured tables (CSV, XLSX, XLS, PDF tables, DOCX tables) → DuckDB (TEXT-only columns)
-    """
     def __init__(self, settings):
         self.dir = Path(settings.kb_dir); self.dir.mkdir(parents=True, exist_ok=True)
         self.embed = Embeddings(backend=settings.embed_backend, base_url=settings.base_url)
@@ -44,12 +39,52 @@ class KnowledgeBase:
         words = text.split()
         return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
 
+    # -------- heading extractors ----------
+    def _docx_headings(self, document) -> List[tuple[int,int,str]]:
+        res = []
+        for p in document.paragraphs:
+            st = getattr(p, "style", None)
+            name = getattr(st, "name", "") if st else ""
+            # detect 'Heading X'
+            if name.lower().startswith("heading"):
+                try:
+                    lvl = int("".join(ch for ch in name if ch.isdigit()))
+                except Exception:
+                    lvl = 1
+                text = p.text.strip()
+                if text:
+                    res.append((1, lvl, text))  # page=1 (docx has no pages)
+        return res
+
+    def _pdf_headings(self, pdf) -> List[tuple[int,int,str]]:
+        res = []
+        if not pdfplumber: return res
+        try:
+            for pidx, page in enumerate(pdf.pages, start=1):
+                words = page.extract_words(use_text_flow=True, extra_attrs=["size"]) or []
+                if not words: continue
+                sizes = [w.get("size", 0) for w in words if w.get("size", 0)]
+                if not sizes: continue
+                median = sorted(sizes)[len(sizes)//2]
+                # heuristic: headings are lines with avg font size >= median * 1.25
+                lines: Dict[int, List[dict]] = {}
+                for w in words:
+                    top = int(w.get("top", 0))
+                    lines.setdefault(top, []).append(w)
+                for top, ws in lines.items():
+                    avg = sum(w.get("size", 0) for w in ws) / max(1, len(ws))
+                    if avg >= median * 1.25:
+                        txt = " ".join(w.get("text","") for w in ws).strip()
+                        if txt:
+                            # level heuristic: larger font → lower level number
+                            level = 1 if avg >= median * 1.6 else 2
+                            res.append((pidx, level, txt))
+        except Exception:
+            pass
+        return res
+
+    # -------- ingestion ----------
     def add_files(self, files, parse_tables: bool = True) -> Dict[str, Any]:
-        """
-        Accepts: .pdf, .docx, .md, .txt, .csv, .xlsx, .xls
-        - Structured tables go into DuckDB via StructuredStore (TEXT-only).
-        - Small text samples from CSV/XLSX/XLS are also indexed into vectors for better recall.
-        """
         text_results: List[IndexTextResult] = []
         tables_added = 0
 
@@ -62,63 +97,66 @@ class KnowledgeBase:
                 out.write(content)
 
             lower = name.lower()
+            size_bytes = os.path.getsize(path)
 
-            # ---------- PDF ----------
             if lower.endswith(".pdf") and pdfplumber:
                 with pdfplumber.open(path) as pdf:
                     if parse_tables:
                         tables_added += self.structured.add_pdf_tables(name, pdf).tables_added
+                    # headings
+                    heads = self._pdf_headings(pdf)
+                    if heads:
+                        self.structured.add_headings(name, heads)
+                    # text chunks
                     for i, page in enumerate(pdf.pages, start=1):
                         text = page.extract_text() or ""
                         if not text.strip():
                             continue
                         for idx, chunk in enumerate(self._chunk_text(text)):
                             uid = hashlib.sha1(f"{name}-{i}-{idx}-{len(chunk)}".encode()).hexdigest()
-                            text_results.append(IndexTextResult(
-                                id=uid, source=name, page=i, chars=len(chunk), preview=chunk[:160]
-                            ))
+                            text_results.append(IndexTextResult(id=uid, source=name, page=i, chars=len(chunk), preview=chunk[:160]))
+                # record doc (tables were counted inside add_pdf_tables)
+                self.structured.record_document(name, "pdf", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
-            # ---------- DOCX ----------
             elif lower.endswith(".docx") and docx:
                 document = docx.Document(str(path))
-                # tables → DuckDB (TEXT-only)
+                # tables
                 try:
                     res = self.structured.add_docx_tables(name, document)
                     tables_added += res.tables_added
                 except Exception:
                     pass
-                # paragraphs → vectors
+                # headings
+                heads = self._docx_headings(document)
+                if heads:
+                    self.structured.add_headings(name, heads)
+                # paragraphs → text chunks
                 buf = [p.text for p in document.paragraphs if p.text and p.text.strip()]
                 if buf:
                     full = " ".join(buf)
                     for idx, chunk in enumerate(self._chunk_text(full)):
                         uid = hashlib.sha1(f"{name}-docx-{idx}-{len(chunk)}".encode()).hexdigest()
-                        text_results.append(IndexTextResult(
-                            id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]
-                        ))
+                        text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
+                # record doc
+                self.structured.record_document(name, "docx", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
-            # ---------- CSV ----------
             elif lower.endswith(".csv"):
-                # tables → DuckDB (TEXT-only)
                 tables_added += self.structured.add_csv(name, content).tables_added
-                # sample → vectors
+                # small sample → vectors
                 try:
                     import pandas as pd
                     df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False, low_memory=False)
                     text = df.head(50).to_csv(index=False)
                     for idx, chunk in enumerate(self._chunk_text(text, size=200)):
                         uid = hashlib.sha1(f"{name}-csv-{idx}-{len(chunk)}".encode()).hexdigest()
-                        text_results.append(IndexTextResult(
-                            id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]
-                        ))
+                        text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
+                # record doc is inside add_csv
 
-            # ---------- XLSX ----------
             elif lower.endswith(".xlsx"):
-                # tables → DuckDB (TEXT-only)
                 tables_added += self.structured.add_xlsx(name, content).tables_added
-                # per-sheet samples → vectors
+                # per-sheet samples
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="openpyxl")
@@ -126,17 +164,14 @@ class KnowledgeBase:
                         text = df.head(30).to_csv(index=False)
                         for idx, chunk in enumerate(self._chunk_text(text, size=200)):
                             uid = hashlib.sha1(f"{name}-{sname}-xlsx-{idx}-{len(chunk)}".encode()).hexdigest()
-                            text_results.append(IndexTextResult(
-                                id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]
-                            ))
+                            text_results.append(IndexTextResult(id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
+                # record doc is inside add_xlsx
 
-            # ---------- XLS ----------
             elif lower.endswith(".xls"):
-                # tables → DuckDB (TEXT-only)
                 tables_added += self.structured.add_xls(name, content).tables_added
-                # per-sheet samples → vectors
+                # per-sheet samples
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
@@ -144,13 +179,11 @@ class KnowledgeBase:
                         text = df.head(30).to_csv(index=False)
                         for idx, chunk in enumerate(self._chunk_text(text, size=200)):
                             uid = hashlib.sha1(f"{name}-{sname}-xls-{idx}-{len(chunk)}".encode()).hexdigest()
-                            text_results.append(IndexTextResult(
-                                id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]
-                            ))
+                            text_results.append(IndexTextResult(id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
+                # record doc is inside add_xls
 
-            # ---------- Plain text files ----------
             elif lower.endswith(".md") or lower.endswith(".txt"):
                 try:
                     text = path.read_text(encoding="utf-8", errors="ignore")
@@ -158,24 +191,22 @@ class KnowledgeBase:
                     text = ""
                 for idx, chunk in enumerate(self._chunk_text(text)):
                     uid = hashlib.sha1(f"{name}-raw-{idx}-{len(chunk)}".encode()).hexdigest()
-                    text_results.append(IndexTextResult(
-                        id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]
-                    ))
+                    text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
+                self.structured.record_document(name, "text", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
-            # ---------- Unknown extension: try as UTF-8 text ----------
             else:
+                # try plain text fallback
                 try:
                     text = path.read_text(encoding="utf-8", errors="ignore")
                     if text.strip():
                         for idx, chunk in enumerate(self._chunk_text(text)):
                             uid = hashlib.sha1(f"{name}-raw-{idx}-{len(chunk)}".encode()).hexdigest()
-                            text_results.append(IndexTextResult(
-                                id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]
-                            ))
+                            text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
+                self.structured.record_document(name, "other", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
-        # ---- Persist all text snippets to FAISS ----
+        # persist text chunks to FAISS
         if text_results:
             docs = [t.preview for t in text_results]
             vecs = self.embed.embed(docs)
@@ -185,7 +216,7 @@ class KnowledgeBase:
 
         return {"text_chunks": [t.__dict__ for t in text_results], "tables_added": tables_added}
 
-    # ---- Retrieval APIs ----
+    # retrieval
     def search_text(self, query: str, k: int = 5) -> List[Chunk]:
         if not query.strip():
             return []
@@ -195,7 +226,7 @@ class KnowledgeBase:
     def search_structured_context(self, query: str, top_k: int = 5) -> str:
         return self.structured.search_context(query, top_k=top_k)
 
-    # ---- Admin helpers ----
+    # admin
     def purge_index(self):
         self.vs.purge()
 
