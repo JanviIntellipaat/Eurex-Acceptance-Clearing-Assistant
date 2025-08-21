@@ -101,7 +101,7 @@ class KnowledgeBase:
             elif lower.endswith(".csv"):
                 # tables → DuckDB (TEXT-only)
                 tables_added += self.structured.add_csv(name, content).tables_added
-                # small sample → vectors
+                # sample → vectors
                 try:
                     import pandas as pd
                     df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False, low_memory=False)
@@ -118,11 +118,11 @@ class KnowledgeBase:
             elif lower.endswith(".xlsx"):
                 # tables → DuckDB (TEXT-only)
                 tables_added += self.structured.add_xlsx(name, content).tables_added
-                # small per-sheet samples → vectors
+                # per-sheet samples → vectors
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="openpyxl")
-                    for sname, df in list(sheets.items())[:3]:  # sample up to first 3 sheets
+                    for sname, df in list(sheets.items())[:3]:
                         text = df.head(30).to_csv(index=False)
                         for idx, chunk in enumerate(self._chunk_text(text, size=200)):
                             uid = hashlib.sha1(f"{name}-{sname}-xlsx-{idx}-{len(chunk)}".encode()).hexdigest()
@@ -135,21 +135,8 @@ class KnowledgeBase:
             # ---------- XLS ----------
             elif lower.endswith(".xls"):
                 # tables → DuckDB (TEXT-only)
-                # Requires: pip install xlrd
-                if hasattr(self.structured, "add_xls"):
-                    tables_added += self.structured.add_xls(name, content).tables_added
-                else:
-                    # fallback: parse here (kept for forward compatibility)
-                    try:
-                        import pandas as pd
-                        sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
-                        from .structured import StructuredStore  # use the existing store methods
-                        # Write each sheet via the store's internal all-text method if exposed; otherwise register via temp tables
-                        # Here we just index text samples; delegate table creation to structured.add_xls when available
-                        pass
-                    except Exception:
-                        pass
-                # small per-sheet samples → vectors
+                tables_added += self.structured.add_xls(name, content).tables_added
+                # per-sheet samples → vectors
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
@@ -186,7 +173,6 @@ class KnowledgeBase:
                                 id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]
                             ))
                 except Exception:
-                    # silently skip
                     pass
 
         # ---- Persist all text snippets to FAISS ----
