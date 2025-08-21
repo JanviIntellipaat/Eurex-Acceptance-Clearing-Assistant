@@ -136,16 +136,28 @@ class StructuredStore:
     # -------- Search & Admin --------
     def search_context(self, query: str, top_k: int = 5) -> str:
         q = query.lower().split()
-        tables = self.db.execute("SELECT table_name, source, coalesce(cast(page as int), -1) FROM kb_tables").fetchall()
+        tables = self.db.execute(
+            "SELECT table_name, source, coalesce(cast(page as int), -1) FROM kb_tables"
+        ).fetchall()
+    
         snippets = []
         for tname, source, page in tables:
-            cols = [c[0] for c in self.db.execute(f"PRAGMA table_info('{tname}')").fetchall()]
-            text = f"{tname} (cols: {', '.join(cols[:10])}) from {source}{f' p{page}' if page and page>0 else ''}"
-            score = sum(1 for tok in q if tok in tname.lower() or any(tok in c.lower() for c in cols))
+            # FIX: pick column_name at index 1 (not column_id at index 0) and cast to str
+            info_rows = self.db.execute(f"PRAGMA table_info('{tname}')").fetchall()
+            cols = [str(r[1]) for r in info_rows]  # r[1] == column_name in DuckDB
+    
+            text = f"{tname} (cols: {', '.join(cols[:10])}) from {source}{f' p{page}' if page and page > 0 else ''}"
+    
+            # quick relevance score: token matches in table name or column names
+            score = sum(1 for tok in q if tok in tname.lower() or any(tok in (c.lower() if c else "") for c in cols))
             if score > 0:
                 sample = self.db.execute(f"SELECT * FROM {tname} LIMIT 3").fetchdf()
+                # ensure markdown-friendly string rendering
+                sample = sample.astype(str)
                 snippets.append(text + "\n" + sample.to_markdown(index=False))
+    
         return "\n\n".join(snippets[:top_k])
+
 
     def purge(self):
         tbls = [r[0] for r in self.db.execute("SELECT table_name FROM kb_tables").fetchall()]
