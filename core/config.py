@@ -24,7 +24,7 @@ class Settings(BaseModel):
     conv_db_path: str = "data/conversations.sqlite"
 
     # Embeddings
-    embed_backend: str = Field(default_factory=lambda: os.environ.get("EMBED_BACKEND", "bge-large-en-v1.5"))
+    embed_backend: str = Field(default_factory=lambda: os.environ.get("EMBED_BACKEND", "ollama:mxbai-embed-large"))
     embed_dim: int = 1024
 
     # Optional endpoints / keys
@@ -52,7 +52,6 @@ class Settings(BaseModel):
             data["embed_dim"] = data["vector_dim"]
         if "openai_key" in data and "openai_api_key" not in data:
             data["openai_api_key"] = data["openai_key"]
-        # various base URL aliases
         if "api_base" in data and "base_url" not in data:
             data["base_url"] = data["api_base"]
         if "openai_api_base" in data and "base_url" not in data:
@@ -63,72 +62,72 @@ class Settings(BaseModel):
             data["base_url"] = data["ollama_base_url"]
         super().__init__(**data)
 
-    # Properties for legacy attribute access in code
+    # Legacy attribute aliases
     @property
-    def max_tokens(self) -> int:              # old -> new
+    def max_tokens(self) -> int:  # old -> new
         return self.max_output_tokens
     @max_tokens.setter
     def max_tokens(self, value: int) -> None:
         self.max_output_tokens = int(value)
 
     @property
-    def db_path(self) -> str:                 # old -> new
+    def db_path(self) -> str:     # old -> new
         return self.duckdb_path
     @db_path.setter
     def db_path(self, value: str) -> None:
         self.duckdb_path = value
 
     @property
-    def sqlite_path(self) -> str:             # old -> new
+    def sqlite_path(self) -> str:
         return self.conv_db_path
     @sqlite_path.setter
     def sqlite_path(self, value: str) -> None:
         self.conv_db_path = value
 
     @property
-    def history_db_path(self) -> str:         # old -> new
+    def history_db_path(self) -> str:
         return self.conv_db_path
     @history_db_path.setter
     def history_db_path(self, value: str) -> None:
         self.conv_db_path = value
 
     @property
-    def kb_path(self) -> str:                 # old -> new
+    def kb_path(self) -> str:
         return self.kb_dir
     @kb_path.setter
     def kb_path(self, value: str) -> None:
         self.kb_dir = value
 
     @property
-    def kb_folder(self) -> str:               # old -> new
+    def kb_folder(self) -> str:
         return self.kb_dir
     @kb_folder.setter
     def kb_folder(self, value: str) -> None:
         self.kb_dir = value
 
     @property
-    def embedding_dim(self) -> int:           # old -> new
+    def embedding_dim(self) -> int:
         return self.embed_dim
     @embedding_dim.setter
     def embedding_dim(self, value: int) -> None:
         self.embed_dim = int(value)
 
     @property
-    def vector_dim(self) -> int:              # old -> new
+    def vector_dim(self) -> int:
         return self.embed_dim
     @vector_dim.setter
     def vector_dim(self, value: int) -> None:
         self.embed_dim = int(value)
 
     @property
-    def openai_key(self) -> Optional[str]:    # old -> new
+    def openai_key(self) -> Optional[str]:
         return self.openai_api_key
     @openai_key.setter
     def openai_key(self, value: Optional[str]) -> None:
         self.openai_api_key = value
 
     @property
-    def api_base(self) -> Optional[str]:      # old -> new
+    def api_base(self) -> Optional[str]:
         return self.base_url
     @api_base.setter
     def api_base(self, value: Optional[str]) -> None:
@@ -177,7 +176,7 @@ def load_settings(path: Path = SETTINGS_PATH) -> Settings:
 def save_settings(s: Settings, path: Path = SETTINGS_PATH) -> None:
     _ensure_dirs(s)
     data = s.model_dump()
-    # also write legacy keys so older code reading the JSON keeps working
+    # also write legacy keys for older code that reads JSON
     data["max_tokens"] = data.get("max_output_tokens", s.max_output_tokens)
     data["db_path"] = data.get("duckdb_path", s.duckdb_path)
     data["sqlite_path"] = data.get("conv_db_path", s.conv_db_path)
@@ -198,7 +197,7 @@ def get_settings(path: Path = SETTINGS_PATH) -> Settings:
     return load_settings(path)
 
 def save_settings_to_env(s: Settings) -> None:
-    """Push selected settings to current process env (not permanent)."""
+    """Push selected settings into current process env (not permanent)."""
     if s.embed_backend:
         os.environ["EMBED_BACKEND"] = s.embed_backend
     if s.openai_api_key:
