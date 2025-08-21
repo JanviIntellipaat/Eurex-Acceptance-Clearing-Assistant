@@ -1,1 +1,5 @@
-
+:root { --radius: 16px; }
+section.main .block-container { padding-top: 1rem; max-width: 1200px; }
+.stButton>button, .stDownloadButton>button { border-radius: var(--radius); padding: 0.5rem 0.9rem; }
+.stTextInput>div>div>input, .stTextArea textarea { border-radius: var(--radius); }
+code { white-space: pre-wrap; }
