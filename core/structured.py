@@ -361,6 +361,76 @@ class StructuredStore:
                 break
         return "\n\n".join(snippets)
 
+    def resources_for_query(self, query: str, top_k: int = 5) -> List[dict]:
+        """
+        Return structured resources matching the query, as JSON-friendly dicts:
+        [
+          {
+            "document": "<file.xlsx>",
+            "sheet": "<Sheet1>",
+            "table": "<normalized_table_name>",
+            "n_cols": 12, "n_rows": 345,
+            "columns": ["parent ▸ child", "OtherCol", ...]
+          },
+          ...
+        ]
+        """
+        q_tokens = [t.strip().lower() for t in query.split() if t.strip()]
+        tables = self.db.execute("SELECT table_name, source, sheet FROM kb_tables").fetchall()
+        out = []
+        for tname, source, sheet in tables:
+            # column names (DuckDB PRAGMA: (cid, name, ...))
+            cols = [str(r[1]) for r in self.db.execute(f"PRAGMA table_info('{tname}')").fetchall()]
+            # relevance by token presence in table/sheet/columns
+            score = sum(
+                1 for tok in q_tokens
+                if tok in (tname or "").lower()
+                or tok in (source or "").lower()
+                or tok in (sheet or "").lower()
+                or any(tok in (c.lower() if c else "") for c in cols)
+            )
+            if score <= 0:
+                continue
+    
+            # sheet size + hierarchical column labels (if any)
+            n_cols, n_rows = 0, 0
+            try:
+                row = self.db.execute(
+                    "SELECT n_cols, n_rows FROM kb_sheets WHERE source=? AND sheet=?",
+                    [source, sheet]
+                ).fetchone()
+                if row: n_cols, n_rows = int(row[0]), int(row[1])
+            except Exception:
+                pass
+    
+            # parent ▸ child if recorded
+            col_rows = self.db.execute("""
+                SELECT col_ordinal, column_name, parent
+                FROM kb_columns
+                WHERE source=? AND sheet=?
+                ORDER BY col_ordinal
+            """, [source, sheet]).fetchall()
+            if col_rows:
+                cols_disp = [
+                    (f"{r[2]} ▸ {r[1]}" if r[2] else str(r[1]))
+                    for r in col_rows
+                ]
+            else:
+                cols_disp = cols
+    
+            out.append({
+                "document": source,
+                "sheet": sheet,
+                "table": tname,
+                "n_cols": n_cols or len(cols),
+                "n_rows": n_rows,
+                "columns": cols_disp[:50],  # cap for readability
+            })
+            if len(out) >= top_k:
+                break
+        return out
+
+
     def purge(self):
         tbls = [r[0] for r in self.db.execute("SELECT table_name FROM kb_tables").fetchall()]
         for t in tbls:
