@@ -3,9 +3,10 @@ pydantic>=2.7
 openai>=1.37
 ollama>=0.3
 duckdb>=1.0
-hnswlib>=0.8.0
+faiss-cpu
 pandas>=2.2
 numpy>=1.26
 pdfplumber>=0.11
 python-docx>=1.1
 sentence-transformers>=3.0
+
