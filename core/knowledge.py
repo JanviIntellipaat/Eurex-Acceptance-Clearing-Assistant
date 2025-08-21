@@ -45,7 +45,6 @@ class KnowledgeBase:
         for p in document.paragraphs:
             st = getattr(p, "style", None)
             name = getattr(st, "name", "") if st else ""
-            # detect 'Heading X'
             if name.lower().startswith("heading"):
                 try:
                     lvl = int("".join(ch for ch in name if ch.isdigit()))
@@ -53,7 +52,7 @@ class KnowledgeBase:
                     lvl = 1
                 text = p.text.strip()
                 if text:
-                    res.append((1, lvl, text))  # page=1 (docx has no pages)
+                    res.append((1, lvl, text))
         return res
 
     def _pdf_headings(self, pdf) -> List[tuple[int,int,str]]:
@@ -66,17 +65,15 @@ class KnowledgeBase:
                 sizes = [w.get("size", 0) for w in words if w.get("size", 0)]
                 if not sizes: continue
                 median = sorted(sizes)[len(sizes)//2]
-                # heuristic: headings are lines with avg font size >= median * 1.25
                 lines: Dict[int, List[dict]] = {}
                 for w in words:
                     top = int(w.get("top", 0))
                     lines.setdefault(top, []).append(w)
-                for top, ws in lines.items():
+                for _, ws in lines.items():
                     avg = sum(w.get("size", 0) for w in ws) / max(1, len(ws))
                     if avg >= median * 1.25:
                         txt = " ".join(w.get("text","") for w in ws).strip()
                         if txt:
-                            # level heuristic: larger font → lower level number
                             level = 1 if avg >= median * 1.6 else 2
                             res.append((pidx, level, txt))
         except Exception:
@@ -103,11 +100,9 @@ class KnowledgeBase:
                 with pdfplumber.open(path) as pdf:
                     if parse_tables:
                         tables_added += self.structured.add_pdf_tables(name, pdf).tables_added
-                    # headings
                     heads = self._pdf_headings(pdf)
                     if heads:
                         self.structured.add_headings(name, heads)
-                    # text chunks
                     for i, page in enumerate(pdf.pages, start=1):
                         text = page.extract_text() or ""
                         if not text.strip():
@@ -115,34 +110,28 @@ class KnowledgeBase:
                         for idx, chunk in enumerate(self._chunk_text(text)):
                             uid = hashlib.sha1(f"{name}-{i}-{idx}-{len(chunk)}".encode()).hexdigest()
                             text_results.append(IndexTextResult(id=uid, source=name, page=i, chars=len(chunk), preview=chunk[:160]))
-                # record doc (tables were counted inside add_pdf_tables)
                 self.structured.record_document(name, "pdf", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
             elif lower.endswith(".docx") and docx:
                 document = docx.Document(str(path))
-                # tables
                 try:
                     res = self.structured.add_docx_tables(name, document)
                     tables_added += res.tables_added
                 except Exception:
                     pass
-                # headings
                 heads = self._docx_headings(document)
                 if heads:
                     self.structured.add_headings(name, heads)
-                # paragraphs → text chunks
                 buf = [p.text for p in document.paragraphs if p.text and p.text.strip()]
                 if buf:
                     full = " ".join(buf)
                     for idx, chunk in enumerate(self._chunk_text(full)):
                         uid = hashlib.sha1(f"{name}-docx-{idx}-{len(chunk)}".encode()).hexdigest()
                         text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
-                # record doc
                 self.structured.record_document(name, "docx", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
             elif lower.endswith(".csv"):
                 tables_added += self.structured.add_csv(name, content).tables_added
-                # small sample → vectors
                 try:
                     import pandas as pd
                     df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False, low_memory=False)
@@ -152,11 +141,9 @@ class KnowledgeBase:
                         text_results.append(IndexTextResult(id=uid, source=name, page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
-                # record doc is inside add_csv
 
             elif lower.endswith(".xlsx"):
                 tables_added += self.structured.add_xlsx(name, content).tables_added
-                # per-sheet samples
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="openpyxl")
@@ -167,11 +154,9 @@ class KnowledgeBase:
                             text_results.append(IndexTextResult(id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
-                # record doc is inside add_xlsx
 
             elif lower.endswith(".xls"):
                 tables_added += self.structured.add_xls(name, content).tables_added
-                # per-sheet samples
                 try:
                     import pandas as pd
                     sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
@@ -182,7 +167,6 @@ class KnowledgeBase:
                             text_results.append(IndexTextResult(id=uid, source=f"{name}#{sname}", page=1, chars=len(chunk), preview=chunk[:160]))
                 except Exception:
                     pass
-                # record doc is inside add_xls
 
             elif lower.endswith(".md") or lower.endswith(".txt"):
                 try:
@@ -195,7 +179,6 @@ class KnowledgeBase:
                 self.structured.record_document(name, "text", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
             else:
-                # try plain text fallback
                 try:
                     text = path.read_text(encoding="utf-8", errors="ignore")
                     if text.strip():
@@ -206,7 +189,6 @@ class KnowledgeBase:
                     pass
                 self.structured.record_document(name, "other", size_bytes=size_bytes, sheet_count=0, table_count=0)
 
-        # persist text chunks to FAISS
         if text_results:
             docs = [t.preview for t in text_results]
             vecs = self.embed.embed(docs)
