@@ -13,7 +13,7 @@ from core.gherkin import GherkinGenerator
 from core.prompts import SYSTEM_ASSISTANT, SYSTEM_STRICT_SUFFIX, SYSTEM_CONTEXT_SUFFIX, SYSTEM_ORG_CONTEXT, GHERKIN_SYSTEM
 from core.utils import ensure_dirs, readable_bytes
 
-APP_TITLE = "Eurex Assistant — Chat + Table‑Aware Gherkin Generator"
+APP_TITLE = "Eurex Assistant — Chat + Gherkin Test Case Generator"
 
 def inject_css():
     css_path = Path("static/styles.css")
