@@ -1,9 +1,8 @@
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 from .llm import LLMRouter, ChatMessage
-from .vector_hnsw import Chunk
+from .vector_faiss import Chunk  # FIX: no hnsw
 from .prompts import GHERKIN_SYSTEM, GHERKIN_USER_TEMPLATE
 
 @dataclass
@@ -16,7 +15,12 @@ class GherkinGenerator:
     def __init__(self, router: LLMRouter):
         self.router = router
 
-    def generate(self, feature_name: str, component: Optional[str], constraints: List[str], retrieved: List[Chunk], scenario_count: int = 5):
+    def generate(self,
+                 feature_name: str,
+                 component: Optional[str],
+                 scenario_count: int,
+                 constraints: List[str],
+                 retrieved: List[Chunk] | None = None):
         ctx = ""
         if retrieved:
             ctx_lines = [f"[{i+1}] {c.source} p{c.page or '-'} — {c.text[:300]}..." for i,c in enumerate(retrieved)]
