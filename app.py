@@ -154,7 +154,8 @@ def tab_kb(settings: Settings, kb: KnowledgeBase):
     st.subheader("📚 Knowledge Base")
     st.caption("Add documents. Structured tables go to DuckDB; text chunks go to the vector index.")
 
-    uploaded = st.file_uploader("Upload files", accept_multiple_files=True, type=["pdf","txt","md","docx","csv"])
+    uploaded = st.file_uploader("Upload files", accept_multiple_files=True, type=["pdf","txt","md","docx","csv","xlsx","xls"])
+
     table_aware = st.toggle("Table-aware parsing for PDFs", value=True)
     if uploaded:
         results = kb.add_files(uploaded, parse_tables=table_aware)
