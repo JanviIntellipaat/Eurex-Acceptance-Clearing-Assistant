@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
@@ -13,67 +12,78 @@ class StructuredIngestResult:
 class StructuredStore:
     """
     Stores structured data in DuckDB:
-    - CSV files are imported as tables.
-    - PDF tables (via pdfplumber) are ingested as tables per page.
-    - DOCX tables are ingested when available.
-    Type inference ONLY (no constraints).
+    - CSV files → tables
+    - XLSX files → each sheet as a table
+    - PDF tables (pdfplumber) → page tables
+    - DOCX tables → tables
+
+    IMPORTANT: All columns are stored as VARCHAR (TEXT). No type inference, no constraints.
     """
+
     def __init__(self, duckdb_path: str):
         self.db = duckdb.connect(duckdb_path)
-        self.db.execute("""CREATE TABLE IF NOT EXISTS kb_tables (
-            table_name VARCHAR, source VARCHAR, page INTEGER, created_at TIMESTAMP DEFAULT now()
-        )""")
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS kb_tables (
+                table_name VARCHAR,
+                source VARCHAR,
+                page INTEGER,
+                created_at TIMESTAMP DEFAULT now()
+            )
+        """)
         self.db.commit()
 
     def _register(self, name: str, source: str, page: Optional[int]):
-        self.db.execute("INSERT INTO kb_tables(table_name, source, page) VALUES (?, ?, ?)", (name, source, page))
+        self.db.execute(
+            "INSERT INTO kb_tables(table_name, source, page) VALUES (?, ?, ?)",
+            (name, source, page),
+        )
         self.db.commit()
 
-    def _infer_duckdb_type(self, s: pd.Series) -> str:
-        nonnull = s.dropna()
-        if nonnull.empty:
-            return "VARCHAR"
-        low = nonnull.astype(str).str.strip().str.lower()
-        if (low.isin(["true","false","0","1","yes","no"]).mean() > 0.9):
-            return "BOOLEAN"
-        try:
-            ints = pd.to_numeric(nonnull, errors="raise", downcast="integer")
-            if (ints % 1 == 0).all():
-                return "BIGINT"
-        except Exception:
-            pass
-        try:
-            pd.to_numeric(nonnull, errors="raise")
-            return "DOUBLE"
-        except Exception:
-            pass
-        try:
-            sample = nonnull.astype(str).str.strip()
-            parsed = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
-            if parsed.notna().mean() > 0.7:
-                return "DATE"
-        except Exception:
-            pass
-        return "VARCHAR"
+    def _create_table_all_text(self, table_name: str, df: pd.DataFrame):
+        # Ensure all columns exist and are strings
+        if df is None or df.shape[0] == 0:
+            # still create empty table with VARCHAR columns if possible
+            if df is None or df.shape[1] == 0:
+                # create a single dummy column to keep a placeholder if needed
+                ddl = f'CREATE OR REPLACE TABLE {table_name} ("_empty" VARCHAR);'
+                self.db.execute(ddl)
+                self.db.commit()
+                return
+        # Make sure column names are strings
+        df.columns = [str(c) if c is not None else "_col" for c in df.columns]
+        # Convert all cells to string, but keep empty strings for NaNs
+        df = df.astype(str)
 
-    def _create_table_with_types(self, table_name: str, df: pd.DataFrame):
-        cols = []
-        for col in df.columns:
-            duck_type = self._infer_duckdb_type(df[col])
-            cols.append(f'"{col}" {duck_type}')
+        # Build DDL: all columns as VARCHAR
+        cols = [f'"{c}" VARCHAR' for c in df.columns]
         ddl = f"CREATE OR REPLACE TABLE {table_name} ({', '.join(cols)});"
         self.db.execute(ddl)
+
+        # Insert the data
         self.db.register("df_tmp", df)
-        self.db.execute(f'INSERT INTO {table_name} SELECT * FROM df_tmp')
+        self.db.execute(f"INSERT INTO {table_name} SELECT * FROM df_tmp")
         self.db.unregister("df_tmp")
         self.db.commit()
 
     def add_csv(self, name: str, content: bytes) -> StructuredIngestResult:
-        df = pd.read_csv(io.BytesIO(content))
+        # Read as strings only; no NA casting
+        df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False, low_memory=False)
         tname = self._normalize_name(name.replace(".csv",""))
-        self._create_table_with_types(tname, df)
+        self._create_table_all_text(tname, df)
         self._register(tname, name, None)
         return StructuredIngestResult(tables_added=1, table_names=[tname])
+
+    def add_xlsx(self, name: str, content: bytes) -> StructuredIngestResult:
+        # Load ALL sheets; each becomes a table
+        sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="openpyxl")
+        count = 0; names = []
+        base = name.replace(".xlsx","")
+        for sheet_name, df in sheets.items():
+            tname = self._normalize_name(f"{base}_{sheet_name}")
+            self._create_table_all_text(tname, df)
+            self._register(tname, name, None)
+            count += 1; names.append(tname)
+        return StructuredIngestResult(tables_added=count, table_names=names)
 
     def add_docx_tables(self, name: str, doc) -> StructuredIngestResult:
         tables = getattr(doc, "tables", [])
@@ -82,10 +92,11 @@ class StructuredStore:
             rows = []
             for r in tbl.rows:
                 rows.append([c.text for c in r.cells])
-            if not rows: continue
-            df = pd.DataFrame(rows[1:], columns=rows[0] if rows else None)
+            if not rows:
+                continue
+            df = pd.DataFrame(rows[1:], columns=rows[0] if rows else None).astype(str)
             tname = self._normalize_name(f"{name.replace('.docx','')}_table_{idx}")
-            self._create_table_with_types(tname, df)
+            self._create_table_all_text(tname, df)
             self._register(tname, name, None)
             count += 1; names.append(tname)
         return StructuredIngestResult(tables_added=count, table_names=names)
@@ -98,16 +109,18 @@ class StructuredStore:
             except Exception:
                 tables = []
             for tidx, tbl in enumerate(tables, start=1):
-                if not tbl: continue
+                if not tbl:
+                    continue
                 header = tbl[0]
                 body = tbl[1:] if len(tbl) > 1 else []
                 has_header = all(h is not None and str(h).strip() != "" for h in header)
+                import pandas as pd
                 if has_header:
-                    df = pd.DataFrame(body, columns=header)
+                    df = pd.DataFrame(body, columns=header).astype(str)
                 else:
-                    df = pd.DataFrame(tbl)
+                    df = pd.DataFrame(tbl).astype(str)
                 tname = self._normalize_name(f"{name.replace('.pdf','')}_p{pidx}_t{tidx}")
-                self._create_table_with_types(tname, df)
+                self._create_table_all_text(tname, df)
                 self._register(tname, name, pidx)
                 count += 1; names.append(tname)
         return StructuredIngestResult(tables_added=count, table_names=names)
