@@ -59,16 +59,17 @@ def sidebar(settings: Settings) -> Settings:
             return new
 
         return settings
-
+        
 def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, router: LLMRouter):
-    st.subheader("💬 Team Chatbot (Retrieval‑Augmented)")
+    st.subheader("💬 Team Chatbot (Retrieval-Augmented)")
     st.caption("Answers are based on retrieved context from text and structured data.")
 
+    # Ensure a session exists
     if "session_id" not in st.session_state:
         st.session_state.session_id = mem.start_session(user="user")
-
     session_id = st.session_state.session_id
 
+    # Header controls
     cols = st.columns([3,1,1,1])
     with cols[0]:
         conv_name = st.text_input("Conversation name", value=mem.get_title(session_id) or "Untitled chat")
@@ -83,46 +84,74 @@ def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, rout
             data = mem.export_all_for_session(session_id)
             st.download_button("Download JSON", data=json.dumps(data, indent=2), file_name=f"chat_{session_id}.json", mime="application/json")
 
-    # Show history
+    # Render history (read-only)
     history = mem.get_messages(session_id)
     for m in history[-200:]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
+    # Input
     query = st.chat_input("Ask a question")
-    if query:
-        with st.chat_message("user"):
-            st.markdown(query)
-        mem.append_message(session_id, "user", query)
+    if not query:
+        return
 
-        # Retrieve both unstructured and structured
+    # Immediately echo user message
+    with st.chat_message("user"):
+        st.markdown(query)
+    mem.append_message(session_id, "user", query)
+
+    # Retrieve both unstructured and structured context
+    with st.spinner("Retrieving context…"):
         ctx_chunks = kb.search_text(query, k=6)
-        ctx_text = "\n\n".join([f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i,c in enumerate(ctx_chunks, 1)]) if ctx_chunks else "(no text context)"
+        ctx_text = "\n\n".join(
+            [f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i, c in enumerate(ctx_chunks, 1)]
+        ) if ctx_chunks else "(no text context)"
         struct_ctx = kb.search_structured_context(query, top_k=3)
 
-        # Build system messages
-        system = SYSTEM_ASSISTANT + SYSTEM_ORG_CONTEXT + SYSTEM_CONTEXT_SUFFIX
-        if settings.strict:
-            system += SYSTEM_STRICT_SUFFIX
+    # Build system messages
+    system = SYSTEM_ASSISTANT + SYSTEM_ORG_CONTEXT + SYSTEM_CONTEXT_SUFFIX
+    if settings.strict:
+        system += SYSTEM_STRICT_SUFFIX
 
-        # Include a short summary of prior conversation
+    # Include a short summary of prior conversation
+    summary = ""
+    try:
         summary = mem.summarize(session_id, router, max_turns=12)
-        sys_msgs = [ChatMessage(role="system", content=system)]
-        if summary:
-            sys_msgs.append(ChatMessage(role="system", content=f"Prior summary:\n{summary}"))
-        # Include retrieved context
-        sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
-        if struct_ctx:
-            sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
+    except Exception:
+        summary = ""
 
-        msgs = sys_msgs + [ChatMessage(role=m["role"], content=m["content"]) for m in mem.get_messages(session_id)]
-        with st.chat_message("assistant"):
-            placeholder = st.empty()   # ← single, updatable UI slot
-            resp = ""
+    sys_msgs = [ChatMessage(role="system", content=system)]
+    if summary:
+        sys_msgs.append(ChatMessage(role="system", content=f"Prior summary:\n{summary}"))
+    sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
+    if struct_ctx:
+        sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
+
+    msgs = sys_msgs + [ChatMessage(role=m["role"], content=m["content"]) for m in mem.get_messages(session_id)]
+
+    # Stream assistant reply safely (single placeholder, with fallback)
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        resp_chunks = []
+        try:
             for chunk in router.stream_chat(msgs):
-                resp += chunk
-                placeholder.markdown(resp)  # ← updates in-place
-            mem.append_message(session_id, "assistant", resp)
+                if not chunk:
+                    continue
+                resp_chunks.append(chunk)
+                # Update UI every few tokens to avoid flicker
+                if len(resp_chunks) % 6 == 0:
+                    placeholder.markdown("".join(resp_chunks))
+            final_resp = "".join(resp_chunks).strip()
+            if not final_resp:
+                # Fallback if stream returned nothing
+                final_resp = router.complete("", system=system)
+        except Exception as e:
+            # Non-stream fallback
+            final_resp = router.complete("", system=system)
+
+        placeholder.markdown(final_resp)
+        mem.append_message(session_id, "assistant", final_resp)
+
 
 def tab_testcases(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, router: LLMRouter):
     st.subheader("🧪 Acceptance Test Generator (Eurex / Deutsche Börse)")
