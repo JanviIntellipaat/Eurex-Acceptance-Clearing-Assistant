@@ -5,6 +5,7 @@ import json
 import os
 from pydantic import BaseModel, Field
 
+# where we persist settings
 SETTINGS_PATH = Path(".settings.json")
 
 class Settings(BaseModel):
@@ -15,7 +16,7 @@ class Settings(BaseModel):
 
     # Behavior flags
     strict: bool = False
-    show_resources: bool = False                      # <— NEW: toggle to show JSON resources in sidebar
+    show_resources: bool = False                      # <— NEW toggle for sidebar JSON
     max_output_tokens: int = 1024
 
     # Storage
@@ -27,7 +28,7 @@ class Settings(BaseModel):
     embed_backend: str = Field(default_factory=lambda: os.environ.get("EMBED_BACKEND", "bge-large-en-v1.5"))
     embed_dim: int = 1024
 
-    # Optional base URL (e.g., custom Ollama or OpenAI endpoint)
+    # Optional base URL override (e.g., custom Ollama/OpenAI endpoint)
     base_url: Optional[str] = None
 
 def _ensure_dirs(s: Settings) -> None:
@@ -36,6 +37,7 @@ def _ensure_dirs(s: Settings) -> None:
     Path(s.conv_db_path).parent.mkdir(parents=True, exist_ok=True)
 
 def load_settings(path: Path = SETTINGS_PATH) -> Settings:
+    """Primary loader used by the app."""
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -44,7 +46,6 @@ def load_settings(path: Path = SETTINGS_PATH) -> Settings:
             return s
         except Exception:
             pass
-    # defaults
     s = Settings()
     _ensure_dirs(s)
     return s
@@ -52,3 +53,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> Settings:
 def save_settings(s: Settings, path: Path = SETTINGS_PATH) -> None:
     _ensure_dirs(s)
     path.write_text(s.model_dump_json(indent=2), encoding="utf-8")
+
+# --- Compatibility shim for older imports ---
+def get_settings(path: Path = SETTINGS_PATH) -> Settings:
+    """Backwards-compatible alias so existing code that imports get_settings keeps working."""
+    return load_settings(path)
