@@ -59,97 +59,95 @@ def sidebar(settings: Settings) -> Settings:
             return new
 
         return settings
-        
+
 def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, router: LLMRouter):
     st.subheader("💬 Team Chatbot (Retrieval-Augmented)")
-    st.caption("Answers are based on retrieved context from text and structured data.")
 
-    # Ensure a session exists
     if "session_id" not in st.session_state:
         st.session_state.session_id = mem.start_session(user="user")
     session_id = st.session_state.session_id
 
-    # Header controls
     cols = st.columns([3,1,1,1])
     with cols[0]:
         conv_name = st.text_input("Conversation name", value=mem.get_title(session_id) or "Untitled chat")
     with cols[1]:
-        if st.button("💾 Save"):
-            mem.rename_session(session_id, conv_name); st.toast("Saved title")
+        if st.button("💾 Save"): mem.rename_session(session_id, conv_name); st.toast("Saved")
     with cols[2]:
-        if st.button("🗑️ Clear"):
-            mem.clear_session(session_id); st.toast("Cleared conversation")
+        if st.button("🗑️ Clear"): mem.clear_session(session_id); st.toast("Cleared")
     with cols[3]:
         if st.button("⬇️ Export"):
             data = mem.export_all_for_session(session_id)
             st.download_button("Download JSON", data=json.dumps(data, indent=2), file_name=f"chat_{session_id}.json", mime="application/json")
 
-    # Render history (read-only)
+    # show history
     history = mem.get_messages(session_id)
     for m in history[-200:]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    # Input
-    query = st.chat_input("Ask a question")
-    if not query:
+    # composer placed here → appears UNDER the last answer
+    with st.form("ask_form", clear_on_submit=True):
+        query = st.text_area("Ask a question", height=80, placeholder="Type your question…")
+        submitted = st.form_submit_button("Send")
+    if not submitted or not query.strip():
         return
 
-    # Immediately echo user message
+    # echo user
     with st.chat_message("user"):
         st.markdown(query)
     mem.append_message(session_id, "user", query)
 
-    # Retrieve both unstructured and structured context
+    # Retrieve context
     with st.spinner("Retrieving context…"):
         ctx_chunks = kb.search_text(query, k=6)
-        ctx_text = "\n\n".join(
-            [f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i, c in enumerate(ctx_chunks, 1)]
-        ) if ctx_chunks else "(no text context)"
+        ctx_text = "\n\n".join([f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i,c in enumerate(ctx_chunks, 1)]) if ctx_chunks else "(no text context)"
         struct_ctx = kb.search_structured_context(query, top_k=3)
 
-    # Build system messages
+        # Include sheet inventory automatically for sheet/schema queries
+        ql = query.lower()
+        if any(t in ql for t in ["sheet", "worksheet", "schema", "columns", "headers"]):
+            import re
+            m = re.search(r'([A-Za-z0-9._ ()-]+\.xlsx?)', query)
+            if m:
+                inv = kb.structured.list_sheets(source=m.group(1))
+            else:
+                inv = kb.structured.list_sheets()
+            struct_ctx = (struct_ctx + "\n\n" if struct_ctx else "") + "Sheet inventory:\n" + inv
+
+    # messages
     system = SYSTEM_ASSISTANT + SYSTEM_ORG_CONTEXT + SYSTEM_CONTEXT_SUFFIX
     if settings.strict:
         system += SYSTEM_STRICT_SUFFIX
 
-    # Include a short summary of prior conversation
     summary = ""
     try:
         summary = mem.summarize(session_id, router, max_turns=12)
     except Exception:
-        summary = ""
+        pass
 
     sys_msgs = [ChatMessage(role="system", content=system)]
     if summary:
         sys_msgs.append(ChatMessage(role="system", content=f"Prior summary:\n{summary}"))
-    sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
-    if struct_ctx:
-        sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
+    if ctx_text:   sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
+    if struct_ctx: sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
 
     msgs = sys_msgs + [ChatMessage(role=m["role"], content=m["content"]) for m in mem.get_messages(session_id)]
 
-    # Stream assistant reply safely (single placeholder, with fallback)
+    # stream safely into one placeholder
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        resp_chunks = []
+        ph = st.empty()
+        out = []
         try:
-            for chunk in router.stream_chat(msgs):
-                if not chunk:
-                    continue
-                resp_chunks.append(chunk)
-                # Update UI every few tokens to avoid flicker
-                if len(resp_chunks) % 6 == 0:
-                    placeholder.markdown("".join(resp_chunks))
-            final_resp = "".join(resp_chunks).strip()
-            if not final_resp:
-                # Fallback if stream returned nothing
-                final_resp = router.complete("", system=system)
-        except Exception as e:
-            # Non-stream fallback
+            for ch in router.stream_chat(msgs):
+                if ch: out.append(ch)
+                if len(out) % 8 == 0:
+                    ph.markdown("".join(out))
+        except Exception:
+            pass
+        final_resp = "".join(out).strip()
+        if not final_resp:
             final_resp = router.complete("", system=system)
-
-        placeholder.markdown(final_resp)
+        ph.markdown(final_resp)
         mem.append_message(session_id, "assistant", final_resp)
 
 
