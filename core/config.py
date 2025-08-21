@@ -16,8 +16,8 @@ class Settings(BaseModel):
 
     # Behavior flags
     strict: bool = False
-    show_resources: bool = False                     # sidebar toggle to show resources JSON
-    max_output_tokens: int = 1024
+    show_resources: bool = False
+    max_output_tokens: int = 1024  # <— primary field we use now
 
     # Storage
     kb_dir: str = "data/kb"
@@ -25,13 +25,27 @@ class Settings(BaseModel):
     conv_db_path: str = "data/conversations.sqlite"
 
     # Embeddings
-    # default from env so you can set EMBED_BACKEND in ~/.bashrc
     embed_backend: str = Field(default_factory=lambda: os.environ.get("EMBED_BACKEND", "bge-large-en-v1.5"))
     embed_dim: int = 1024
 
     # Optional endpoints / keys
-    base_url: Optional[str] = None                   # custom provider base URL (Ollama/OpenAI proxies, etc.)
-    openai_api_key: Optional[str] = None             # optional: store key here if you set it in the UI
+    base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+
+    # --- Back-compat: accept/serve old 'max_tokens' key transparently ---
+    def __init__(self, **data):
+        if "max_tokens" in data and "max_output_tokens" not in data:
+            data["max_output_tokens"] = data["max_tokens"]
+        super().__init__(**data)
+
+    @property
+    def max_tokens(self) -> int:
+        """Back-compat alias for older code that uses settings.max_tokens."""
+        return self.max_output_tokens
+
+    @max_tokens.setter
+    def max_tokens(self, value: int) -> None:
+        self.max_output_tokens = int(value)
 
 def _ensure_dirs(s: Settings) -> None:
     Path(s.kb_dir).mkdir(parents=True, exist_ok=True)
@@ -53,9 +67,11 @@ def load_settings(path: Path = SETTINGS_PATH) -> Settings:
     return s
 
 def save_settings(s: Settings, path: Path = SETTINGS_PATH) -> None:
-    """Persist settings to .settings.json"""
     _ensure_dirs(s)
-    path.write_text(s.model_dump_json(indent=2), encoding="utf-8")
+    data = s.model_dump()
+    # Also write legacy key for compatibility with any older code
+    data["max_tokens"] = data.get("max_output_tokens", s.max_output_tokens)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 # --- Compatibility shims for older imports in the app ---
 
