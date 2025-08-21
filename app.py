@@ -66,52 +66,83 @@ def sidebar(settings: Settings) -> Settings:
         return settings
 
 def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, router: LLMRouter):
-    st.subheader("💬 Team Chatbot (Retrieval-Augmented)")
+    """
+    Chat tab:
+    - Composer appears UNDER the latest answer (form-based).
+    - Streams safely into a single placeholder (no flicker).
+    - Auto-includes sheet/schema inventory in context when relevant.
+    - No citations by default; optional Resources JSON shown in sidebar when enabled.
+    """
+    import json, re
+    from core.prompts import (
+        SYSTEM_ASSISTANT, SYSTEM_ORG_CONTEXT, SYSTEM_CONTEXT_SUFFIX, SYSTEM_STRICT_SUFFIX
+    )
+    from core.llm import ChatMessage
 
+    st.subheader("💬 Team Chatbot (Retrieval-Augmented)")
+    st.caption("Answers use retrieved context from documents and structured tables. Sources are hidden by default; ask “source?” to see them in plain English.")
+
+    # Ensure a session exists
     if "session_id" not in st.session_state:
         st.session_state.session_id = mem.start_session(user="user")
     session_id = st.session_state.session_id
 
+    # Header controls
     cols = st.columns([3,1,1,1])
     with cols[0]:
         conv_name = st.text_input("Conversation name", value=mem.get_title(session_id) or "Untitled chat")
     with cols[1]:
-        if st.button("💾 Save"): mem.rename_session(session_id, conv_name); st.toast("Saved")
+        if st.button("💾 Save"):
+            mem.rename_session(session_id, conv_name)
+            st.toast("Saved")
     with cols[2]:
-        if st.button("🗑️ Clear"): mem.clear_session(session_id); st.toast("Cleared")
+        if st.button("🗑️ Clear"):
+            mem.clear_session(session_id)
+            st.toast("Cleared conversation")
     with cols[3]:
-        if st.button("⬇️ Export"):
-            data = mem.export_all_for_session(session_id)
-            st.download_button("Download JSON", data=json.dumps(data, indent=2), file_name=f"chat_{session_id}.json", mime="application/json")
+        # Always offer current export
+        export_data = mem.export_all_for_session(session_id)
+        st.download_button(
+            "⬇️ Export", data=json.dumps(export_data, indent=2),
+            file_name=f"chat_{session_id}.json", mime="application/json"
+        )
 
-    # show history
+    # Render history (kept above the composer so the composer sits under last answer)
     history = mem.get_messages(session_id)
     for m in history[-200:]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    # composer placed here → appears UNDER the last answer
+    # Composer BELOW the last assistant message
     with st.form("ask_form", clear_on_submit=True):
-        query = st.text_area("Ask a question", height=80, placeholder="Type your question…")
+        query = st.text_area("Ask a question", height=90, placeholder="Type your question…")
         submitted = st.form_submit_button("Send")
+
     if not submitted or not query.strip():
         return
 
-    # echo user
+    # Echo user message immediately
     with st.chat_message("user"):
         st.markdown(query)
     mem.append_message(session_id, "user", query)
 
-    # Retrieve context
+    # -------- Retrieve context (text + structured) --------
     with st.spinner("Retrieving context…"):
-        ctx_chunks = kb.search_text(query, k=6)
-        ctx_text = "\n\n".join([f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i,c in enumerate(ctx_chunks, 1)]) if ctx_chunks else "(no text context)"
+        # Unstructured
+        ctx_chunks = kb.search_text(query, k=6)  # FAISS top-k
+        ctx_text = (
+            "\n\n".join(
+                [f"[{i+1}] {c.source} p{c.page or '-'} — {c.text}" for i, c in enumerate(ctx_chunks, 1)]
+            )
+            if ctx_chunks else "(no text context)"
+        )
+
+        # Structured summaries (keyword-aware table snippets)
         struct_ctx = kb.search_structured_context(query, top_k=3)
 
-        # Include sheet inventory automatically for sheet/schema queries
+        # If the user asks about sheets/schema/columns/headers, include precise sheet inventory
         ql = query.lower()
-        if any(t in ql for t in ["sheet", "worksheet", "schema", "columns", "headers"]):
-            import re
+        if any(t in ql for t in ["sheet", "worksheet", "schema", "columns", "headers", "header", "fields"]):
             m = re.search(r'([A-Za-z0-9._ ()-]+\.xlsx?)', query)
             if m:
                 inv = kb.structured.list_sheets(source=m.group(1))
@@ -119,11 +150,59 @@ def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, rout
                 inv = kb.structured.list_sheets()
             struct_ctx = (struct_ctx + "\n\n" if struct_ctx else "") + "Sheet inventory:\n" + inv
 
-    # messages
+        # Optional: build Resources JSON for the sidebar
+        resources_json = None
+        if getattr(settings, "show_resources", False):
+            try:
+                # Structured resources likely relevant to the query
+                struct_resources = kb.structured.resources_for_query(query, top_k=6)
+            except Exception:
+                struct_resources = []
+
+            # Text resources: doc + page + nearest headings (PDF page, DOCX headings)
+            text_resources = []
+            try:
+                con = kb.structured.db  # reuse DuckDB connection
+                for c in ctx_chunks[:6]:
+                    src = c.source.split("#", 1)[0] if "#" in c.source else c.source
+                    page_num = c.page if c.page is not None else None
+                    headings = []
+                    if isinstance(src, str) and src.lower().endswith(".pdf"):
+                        try:
+                            rows = con.execute(
+                                "SELECT heading FROM kb_headings WHERE source=? AND page=? ORDER BY level ASC LIMIT 3",
+                                [src, int(page_num) if page_num else 1]
+                            ).fetchall()
+                            headings = [r[0] for r in rows]
+                        except Exception:
+                            pass
+                    elif isinstance(src, str) and src.lower().endswith(".docx"):
+                        try:
+                            rows = con.execute(
+                                "SELECT heading FROM kb_headings WHERE source=? ORDER BY level ASC LIMIT 5",
+                                [src]
+                            ).fetchall()
+                            headings = [r[0] for r in rows]
+                        except Exception:
+                            pass
+                    text_resources.append({
+                        "document": src,
+                        "page": page_num,
+                        "headings": headings
+                    })
+            except Exception:
+                pass
+
+            resources_json = {"structured": struct_resources, "text": text_resources}
+            with st.sidebar.expander("Resources used (JSON)", expanded=True):
+                st.json(resources_json)
+
+    # -------- Build messages (no citations by default) --------
     system = SYSTEM_ASSISTANT + SYSTEM_ORG_CONTEXT + SYSTEM_CONTEXT_SUFFIX
-    if settings.strict:
+    if getattr(settings, "strict", False):
         system += SYSTEM_STRICT_SUFFIX
 
+    # Short rolling summary to keep context small
     summary = ""
     try:
         summary = mem.summarize(session_id, router, max_turns=12)
@@ -133,25 +212,35 @@ def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, rout
     sys_msgs = [ChatMessage(role="system", content=system)]
     if summary:
         sys_msgs.append(ChatMessage(role="system", content=f"Prior summary:\n{summary}"))
-    if ctx_text:   sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
-    if struct_ctx: sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
+    if ctx_text:
+        sys_msgs.append(ChatMessage(role="system", content=f"Retrieved text context:\n{ctx_text}"))
+    if struct_ctx:
+        sys_msgs.append(ChatMessage(role="system", content=f"Structured data context (read-only):\n{struct_ctx}"))
 
     msgs = sys_msgs + [ChatMessage(role=m["role"], content=m["content"]) for m in mem.get_messages(session_id)]
 
-    # stream safely into one placeholder
+    # -------- Stream assistant reply safely --------
     with st.chat_message("assistant"):
         ph = st.empty()
         out = []
         try:
             for ch in router.stream_chat(msgs):
-                if ch: out.append(ch)
+                if ch:
+                    out.append(ch)
+                # update UI every few tokens to reduce rerenders
                 if len(out) % 8 == 0:
                     ph.markdown("".join(out))
         except Exception:
+            # fall back to non-stream completion if streaming fails
             pass
+
         final_resp = "".join(out).strip()
         if not final_resp:
-            final_resp = router.complete("", system=system)
+            try:
+                final_resp = router.complete("", system=system)
+            except Exception:
+                final_resp = "Sorry—something went wrong generating a response."
+
         ph.markdown(final_resp)
         mem.append_message(session_id, "assistant", final_resp)
 
