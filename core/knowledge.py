@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 import hashlib
 
 from .embeddings import Embeddings
-from .vector_hnsw import HNSWVectorStore, Chunk
+from .vector_faiss import FaissVectorStore, Chunk
 from .structured import StructuredStore
 
 try:
@@ -31,7 +31,7 @@ class KnowledgeBase:
     def __init__(self, settings):
         self.dir = Path(settings.kb_dir); self.dir.mkdir(parents=True, exist_ok=True)
         self.embed = Embeddings(backend=settings.embed_backend, base_url=settings.base_url)
-        self.vs = HNSWVectorStore(self.dir / "index", Path(settings.duckdb_path), dim=settings.embed_dim)
+        self.vs = FaissVectorStore(self.dir / "index", Path(settings.duckdb_path), dim=settings.embed_dim)
         self.structured = StructuredStore(settings.duckdb_path)
 
     def _chunk_text(self, text: str, size: int = 300) -> List[str]:
