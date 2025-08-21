@@ -11,10 +11,10 @@ class StructuredIngestResult:
 
 class StructuredStore:
     """
-    Stores structured data in DuckDB:
+    Stores structured data in DuckDB (TEXT-only columns):
     - CSV files → tables
-    - XLSX files → each sheet as a table
-    - PDF tables (pdfplumber) → page tables
+    - XLSX/XLS files → each sheet as a table
+    - PDF tables (pdfplumber) → per-page tables
     - DOCX tables → tables
 
     IMPORTANT: All columns are stored as VARCHAR (TEXT). No type inference, no constraints.
@@ -40,21 +40,19 @@ class StructuredStore:
         self.db.commit()
 
     def _create_table_all_text(self, table_name: str, df: pd.DataFrame):
-        # Ensure all columns exist and are strings
+        # Handle empty inputs
         if df is None or df.shape[0] == 0:
-            # still create empty table with VARCHAR columns if possible
             if df is None or df.shape[1] == 0:
-                # create a single dummy column to keep a placeholder if needed
                 ddl = f'CREATE OR REPLACE TABLE {table_name} ("_empty" VARCHAR);'
                 self.db.execute(ddl)
                 self.db.commit()
                 return
-        # Make sure column names are strings
+        # Column names as strings
         df.columns = [str(c) if c is not None else "_col" for c in df.columns]
-        # Convert all cells to string, but keep empty strings for NaNs
+        # Coerce all values to string (keep empty strings for NaNs)
         df = df.astype(str)
 
-        # Build DDL: all columns as VARCHAR
+        # Build DDL with VARCHAR for all columns
         cols = [f'"{c}" VARCHAR' for c in df.columns]
         ddl = f"CREATE OR REPLACE TABLE {table_name} ({', '.join(cols)});"
         self.db.execute(ddl)
@@ -65,8 +63,8 @@ class StructuredStore:
         self.db.unregister("df_tmp")
         self.db.commit()
 
+    # -------- Ingestors --------
     def add_csv(self, name: str, content: bytes) -> StructuredIngestResult:
-        # Read as strings only; no NA casting
         df = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False, low_memory=False)
         tname = self._normalize_name(name.replace(".csv",""))
         self._create_table_all_text(tname, df)
@@ -74,7 +72,6 @@ class StructuredStore:
         return StructuredIngestResult(tables_added=1, table_names=[tname])
 
     def add_xlsx(self, name: str, content: bytes) -> StructuredIngestResult:
-        # Load ALL sheets; each becomes a table
         sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="openpyxl")
         count = 0; names = []
         base = name.replace(".xlsx","")
@@ -87,7 +84,6 @@ class StructuredStore:
 
     def add_xls(self, name: str, content: bytes) -> StructuredIngestResult:
         # Requires: pip install xlrd
-        import pandas as pd, io
         sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
         count = 0; names = []
         base = name.replace(".xls","")
@@ -97,7 +93,6 @@ class StructuredStore:
             self._register(tname, name, None)
             count += 1; names.append(tname)
         return StructuredIngestResult(tables_added=count, table_names=names)
-
 
     def add_docx_tables(self, name: str, doc) -> StructuredIngestResult:
         tables = getattr(doc, "tables", [])
@@ -128,7 +123,6 @@ class StructuredStore:
                 header = tbl[0]
                 body = tbl[1:] if len(tbl) > 1 else []
                 has_header = all(h is not None and str(h).strip() != "" for h in header)
-                import pandas as pd
                 if has_header:
                     df = pd.DataFrame(body, columns=header).astype(str)
                 else:
@@ -139,6 +133,7 @@ class StructuredStore:
                 count += 1; names.append(tname)
         return StructuredIngestResult(tables_added=count, table_names=names)
 
+    # -------- Search & Admin --------
     def search_context(self, query: str, top_k: int = 5) -> str:
         q = query.lower().split()
         tables = self.db.execute("SELECT table_name, source, coalesce(cast(page as int), -1) FROM kb_tables").fetchall()
