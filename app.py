@@ -202,6 +202,48 @@ def tab_kb(settings: Settings, kb: KnowledgeBase):
 
         st.markdown("**Structured data hits (by table/column match):**")
         st.code(kb.search_structured_context(q, top_k=5))
+        
+            # --- Inventory panel ---
+    import duckdb
+    st.divider()
+    st.subheader("📦 Documents in Knowledge Base")
+
+    try:
+        con = duckdb.connect(settings.duckdb_path, read_only=True)
+        docs = con.execute("""
+            SELECT source, kind, bytes, sheet_count, table_count, strftime(ingested_at, '%Y-%m-%d %H:%M') AS ingested
+            FROM kb_documents
+            ORDER BY ingested_at DESC
+        """).fetchdf()
+        st.dataframe(docs, use_container_width=True) if not docs.empty else st.write("(no documents)")
+
+        st.subheader("📑 Sheets")
+        sheets = con.execute("""
+            SELECT source, sheet, n_cols, n_rows
+            FROM kb_sheets
+            ORDER BY source, sheet
+        """).fetchdf()
+        st.dataframe(sheets, use_container_width=True) if not sheets.empty else st.write("(no sheets)")
+
+        st.subheader("🧭 Columns (select a file+sheet to preview)")
+        if not sheets.empty:
+            src = st.selectbox("Source file", sorted(sheets["source"].unique()))
+            shs = sheets[sheets["source"] == src]["sheet"].tolist()
+            sh  = st.selectbox("Sheet", shs)
+            cols = con.execute("""
+                SELECT col_ordinal, column_name, parent
+                FROM kb_columns WHERE source=? AND sheet=? ORDER BY col_ordinal
+            """, [src, sh]).fetchdf()
+            if not cols.empty:
+                cols["display"] = cols.apply(lambda r: (f"{int(r['col_ordinal']):02d}. " + (f"{r['parent']} ▸ " if r['parent'] else "") + f"{r['column_name']}"), axis=1)
+                st.dataframe(cols[["display"]], hide_index=True, use_container_width=True)
+            else:
+                st.write("(no columns recorded)")
+        con.close()
+    except Exception as e:
+        st.error(f"Inventory error: {e}")
+
+
 
 def tab_admin(settings: Settings, kb: KnowledgeBase, mem: ConversationStore):
     st.subheader("🔐 Admin")
