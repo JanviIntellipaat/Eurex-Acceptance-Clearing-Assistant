@@ -117,10 +117,11 @@ def tab_chat(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, rout
 
         msgs = sys_msgs + [ChatMessage(role=m["role"], content=m["content"]) for m in mem.get_messages(session_id)]
         with st.chat_message("assistant"):
+            placeholder = st.empty()   # ← single, updatable UI slot
             resp = ""
             for chunk in router.stream_chat(msgs):
                 resp += chunk
-                st.markdown(resp)
+                placeholder.markdown(resp)  # ← updates in-place
             mem.append_message(session_id, "assistant", resp)
 
 def tab_testcases(settings: Settings, kb: KnowledgeBase, mem: ConversationStore, router: LLMRouter):
