@@ -39,6 +39,11 @@ def sidebar(settings: Settings) -> Settings:
         ef_dim_map = {"ollama:mxbai-embed-large":1024, "bge-large-en-v1.5":1024, "bge-m3":1024}
         ef_dim = ef_dim_map.get(embed_backend, settings.embed_dim)
 
+        settings.show_resources = st.sidebar.checkbox(
+        "Show resources (JSON)", value=settings.show_resources,
+        help="When enabled, the sidebar shows a JSON of the documents/sheets/columns and headings used for the current answer."
+        )
+        
         st.divider()
         st.caption("Provider endpoints")
         base_url = st.text_input("Base URL (optional)", value=settings.base_url or "")
