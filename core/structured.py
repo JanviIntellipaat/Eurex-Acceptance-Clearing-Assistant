@@ -135,28 +135,56 @@ class StructuredStore:
 
     # -------- Search & Admin --------
     def search_context(self, query: str, top_k: int = 5) -> str:
-        q = query.lower().split()
+        q_tokens = [t.strip().lower() for t in query.split() if t.strip()]
         tables = self.db.execute(
             "SELECT table_name, source, coalesce(cast(page as int), -1) FROM kb_tables"
         ).fetchall()
     
         snippets = []
         for tname, source, page in tables:
-            # FIX: pick column_name at index 1 (not column_id at index 0) and cast to str
+            # Column info: DuckDB PRAGMA table_info returns (column_id, column_name, ...)
             info_rows = self.db.execute(f"PRAGMA table_info('{tname}')").fetchall()
-            cols = [str(r[1]) for r in info_rows]  # r[1] == column_name in DuckDB
-    
-            text = f"{tname} (cols: {', '.join(cols[:10])}) from {source}{f' p{page}' if page and page > 0 else ''}"
+            cols = [str(r[1]) for r in info_rows]  # column names
     
             # quick relevance score: token matches in table name or column names
-            score = sum(1 for tok in q if tok in tname.lower() or any(tok in (c.lower() if c else "") for c in cols))
-            if score > 0:
-                sample = self.db.execute(f"SELECT * FROM {tname} LIMIT 3").fetchdf()
-                # ensure markdown-friendly string rendering
-                sample = sample.astype(str)
-                snippets.append(text + "\n" + sample.to_markdown(index=False))
+            base_score = sum(
+                1 for tok in q_tokens
+                if tok in tname.lower() or any(tok in (c.lower() if c else "") for c in cols)
+            )
+            if base_score <= 0:
+                continue
     
-        return "\n\n".join(snippets[:top_k])
+            # Prefer rows that contain the tokens anywhere in any column (case-insensitive)
+            where = ""
+            if q_tokens and cols:
+                per_token_clauses = []
+                for tok in q_tokens:
+                    esc = tok.replace("'", "''")
+                    per_token_clauses.append(
+                        " OR ".join([f"lower(\"{c}\") LIKE '%{esc}%'" for c in cols])
+                    )
+                where = " WHERE " + " OR ".join([f"({cl})" for cl in per_token_clauses])
+    
+            # Try filtered sample first; if empty, fall back to first rows
+            try:
+                df = self.db.execute(f"SELECT * FROM {tname}{where} LIMIT 3").fetchdf()
+                if df.empty:
+                    df = self.db.execute(f"SELECT * FROM {tname} LIMIT 3").fetchdf()
+            except Exception:
+                df = self.db.execute(f"SELECT * FROM {tname} LIMIT 3").fetchdf()
+    
+            # Render as plain text (avoid optional 'tabulate' dep)
+            df = df.astype(str)
+            sample_txt = df.to_string(index=False)
+    
+            header = f"{tname} (cols: {', '.join(cols[:10])}) from {source}{f' p{page}' if page and page>0 else ''}"
+            snippets.append(header + "\n" + sample_txt)
+    
+            if len(snippets) >= top_k:
+                break
+    
+        return "\n\n".join(snippets)
+
 
 
     def purge(self):
