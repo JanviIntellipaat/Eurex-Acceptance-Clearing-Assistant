@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import sqlite3, time
 from typing import List, Dict, Any, Optional
@@ -14,36 +13,38 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT,
-    role TEXT,
-    content TEXT,
-    created_at REAL
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at REAL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
 );
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 """
 
 class ConversationStore:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, sqlite_path: str):
+        self.db_path = sqlite_path
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(self.db_path)
-        try:
+        with con:
             con.executescript(SCHEMA)
-            con.commit()
-        finally:
-            con.close()
+        con.close()
 
-    def start_session(self, user: str) -> str:
-        sid = str(int(time.time() * 1000))
+    def start_session(self, user: str = "user") -> str:
+        sid = f"sess_{int(time.time()*1000)}"
         con = sqlite3.connect(self.db_path)
         with con:
             con.execute("INSERT INTO sessions(id,title,user,created_at) VALUES(?,?,?,?)",
-                        (sid, "New conversation", user, time.time()))
+                        (sid, "Untitled chat", user, time.time()))
+        con.close()
         return sid
 
     def rename_session(self, session_id: str, title: str):
         con = sqlite3.connect(self.db_path)
         with con:
             con.execute("UPDATE sessions SET title=? WHERE id=?", (title, session_id))
+        con.close()
 
     def get_title(self, session_id: str) -> Optional[str]:
         con = sqlite3.connect(self.db_path)
@@ -62,8 +63,9 @@ class ConversationStore:
         with con:
             con.execute("INSERT INTO messages(session_id,role,content,created_at) VALUES(?,?,?,?)",
                         (session_id, role, content, time.time()))
+        con.close()
 
-    def get_messages(self, session_id: str, limit: int = 300) -> List[Dict[str,Any]]:
+    def get_messages(self, session_id: str, limit: int = 200) -> List[Dict[str,Any]]:
         con = sqlite3.connect(self.db_path)
         cur = con.execute("SELECT role, content, created_at FROM messages WHERE session_id=? ORDER BY id ASC LIMIT ?",
                           (session_id, limit))
@@ -75,7 +77,9 @@ class ConversationStore:
         history = self.get_messages(session_id, limit=2*max_turns)
         if not history: return ""
         transcript = "\n".join([f"{m['role'].title()}: {m['content']}" for m in history[-2*max_turns:]])
-        prompt = "Summarize the following chat succinctly for future context. Focus on user goals, constraints, definitions, and decisions.\n\n" + transcript + "\n\nSummary:"
+        prompt = ("Summarize the following chat succinctly for future context. "
+                  "Capture goals, constraints, definitions, and decisions.\n\n"
+                  + transcript + "\n\nSummary:")
         return router.complete(prompt)
 
     def export_all_for_session(self, session_id: str):
