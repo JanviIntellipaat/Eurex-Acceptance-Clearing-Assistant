@@ -85,6 +85,20 @@ class StructuredStore:
             count += 1; names.append(tname)
         return StructuredIngestResult(tables_added=count, table_names=names)
 
+    def add_xls(self, name: str, content: bytes) -> StructuredIngestResult:
+        # Requires: pip install xlrd
+        import pandas as pd, io
+        sheets = pd.read_excel(io.BytesIO(content), dtype=str, sheet_name=None, engine="xlrd")
+        count = 0; names = []
+        base = name.replace(".xls","")
+        for sheet_name, df in sheets.items():
+            tname = self._normalize_name(f"{base}_{sheet_name}")
+            self._create_table_all_text(tname, df)
+            self._register(tname, name, None)
+            count += 1; names.append(tname)
+        return StructuredIngestResult(tables_added=count, table_names=names)
+
+
     def add_docx_tables(self, name: str, doc) -> StructuredIngestResult:
         tables = getattr(doc, "tables", [])
         count = 0; names = []
